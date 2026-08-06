@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Add IMGT-explicit mouse IG/TR splice sites to OpenSpliceAI datafiles.
+"""把 NCBI 和 IMGT 的小鼠 IG/TR 明确剪接位点补入 OpenSpliceAI 训练数据。
 
-Run the normal NCBI-based ``openspliceai create-data`` first. This script then
-checks which functional mouse IMGT splice annotations are already represented
-by the NCBI-derived labels and appends only the missing examples to train and
-validation. The NCBI test set is copied unchanged.
+正确的数据优先级是：
+
+1. 保留作者使用 NCBI 普通转录本生成的基线数据；
+2. 从 NCBI GFF3 读取 IG/TR 免疫区段明确或可由相邻 exon 得到的位点；
+3. 检查这些 NCBI 位点是否已经真正存在于基线 HDF5；
+4. 基线中没有的 NCBI 免疫位点加入 train / validation；
+5. IMGT 中明确标注、且 NCBI 没有覆盖的位点再补入；
+6. test 保持作者的 NCBI 基线不变，避免测试集污染。
 """
 
 from __future__ import annotations
@@ -25,14 +29,19 @@ from openspliceai.create_data.immune_splice import (
     write_audit_report,
     write_datafile_h5,
 )
+from openspliceai.create_data.immune_training import (
+    combine_data,
+    coverage_to_report,
+    datafile_positive_sites,
+    find_sites_missing_from_baseline,
+    splice_sites_to_data,
+    split_splice_sites_by_gene,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Audit NCBI mouse IG/TR splice labels, supplement missing explicit "
-            "sites from IMGT, and rebuild OpenSpliceAI datasets."
-        )
+        description="NCBI 优先、IMGT 补缺，生成小鼠 IG/TR 增强训练集。"
     )
     parser.add_argument("--ncbi-gff", type=Path, required=True)
     parser.add_argument("--ncbi-fasta", type=Path, required=True)
@@ -40,28 +49,41 @@ def parse_args() -> argparse.Namespace:
         "--imgt-flat",
         type=Path,
         required=True,
-        help="IMGT/LIGM-DB imgt.dat, imgt.dat.gz, or imgt.dat.Z",
+        help="IMGT/LIGM-DB 的 imgt.dat、imgt.dat.gz 或 imgt.dat.Z",
     )
     parser.add_argument(
         "--base-data-dir",
         type=Path,
         required=True,
-        help="Directory produced by the normal openspliceai create-data command",
+        help="作者原始 openspliceai create-data 生成的目录",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--context-radius", type=int, default=30)
-    parser.add_argument("--match-radius", type=int, default=20)
+    parser.add_argument(
+        "--training-context-radius",
+        type=int,
+        default=5000,
+        help=(
+            "NCBI 免疫位点两侧提取的真实基因组上下文长度；默认每侧 5000 bp，"
+            "可支持 flanking-size=10000"
+        ),
+    )
+    parser.add_argument(
+        "--match-radius",
+        type=int,
+        default=20,
+        help="NCBI/IMGT/基线去重时比较位点两侧多少 bp，默认 20",
+    )
     parser.add_argument("--identity-threshold", type=float, default=0.90)
     parser.add_argument("--validation-ratio", type=float, default=0.10)
     parser.add_argument(
         "--include-nonfunctional",
         action="store_true",
-        help="Also include ORF/pseudogene IMGT records; functional only by default",
+        help="同时加入 ORF/假基因；默认只使用 IMGT functional 记录",
     )
     parser.add_argument(
         "--skip-dataset",
         action="store_true",
-        help="Write merged datafile_*.h5 only; do not rebuild dataset_*.h5",
+        help="只生成合并后的 datafile_*.h5，不生成 dataset_*.h5",
     )
     return parser.parse_args()
 
@@ -78,7 +100,7 @@ def require_base_files(base_dir: Path) -> None:
     ]
     if missing:
         raise FileNotFoundError(
-            f"Missing base OpenSpliceAI files in {base_dir}: {', '.join(missing)}"
+            f"基线目录 {base_dir} 缺少文件：{', '.join(missing)}"
         )
 
 
@@ -87,58 +109,119 @@ def main() -> int:
     require_base_files(args.base_data_dir)
     if args.output_dir.resolve() == args.base_data_dir.resolve():
         raise ValueError(
-            "--output-dir must differ from --base-data-dir to preserve the NCBI baseline"
+            "--output-dir 必须与 --base-data-dir 不同，以保留原始 NCBI 基线"
         )
+    if args.training_context_radius < args.match_radius:
+        raise ValueError("--training-context-radius 不能小于 --match-radius")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("[1/5] Auditing NCBI IG/TR splice labels...")
+    print("[1/7] 读取作者 NCBI 基线中的已有剪接正例……")
+    base_train = read_datafile_h5(args.base_data_dir / "datafile_train.h5")
+    base_validation = read_datafile_h5(
+        args.base_data_dir / "datafile_validation.h5"
+    )
+    baseline_sites = datafile_positive_sites(
+        combine_data(base_train, base_validation),
+        context_radius=max(30, args.match_radius),
+    )
+
+    print("[2/7] 读取 NCBI GRCm39 的 IG/TR 免疫剪接位点……")
     ncbi_sites = read_ncbi_immune_splice_sites(
         args.ncbi_gff,
         args.ncbi_fasta,
-        context_radius=args.context_radius,
+        context_radius=args.training_context_radius,
     )
 
-    print("[2/5] Reading explicit functional mouse IMGT splice features...")
+    print("[3/7] 检查哪些 NCBI 免疫位点尚未真正进入基线 HDF5……")
+    ncbi_missing, ncbi_coverage = find_sites_missing_from_baseline(
+        ncbi_sites,
+        baseline_sites,
+        context_radius=args.match_radius,
+        identity_threshold=1.0,
+    )
+    ncbi_train, ncbi_validation = split_splice_sites_by_gene(
+        ncbi_missing,
+        validation_ratio=args.validation_ratio,
+        seed="openspliceai-imgt-v1",
+    )
+
+    print("[4/7] 读取 IMGT 明确标注的 functional 小鼠剪接位点……")
     imgt_records = read_imgt_splice_records(
         args.imgt_flat,
         functional_only=not args.include_nonfunctional,
         mouse_only=True,
     )
 
-    print("[3/5] Removing sites already covered by NCBI context...")
-    missing_records, report = find_missing_imgt_sites(
+    print("[5/7] 仅保留 NCBI 未覆盖的 IMGT 位点……")
+    imgt_missing, imgt_report = find_missing_imgt_sites(
         imgt_records,
         ncbi_sites,
         context_radius=args.match_radius,
         identity_threshold=args.identity_threshold,
     )
-    train_records, validation_records = split_imgt_records_by_gene(
-        missing_records,
+    imgt_train, imgt_validation = split_imgt_records_by_gene(
+        imgt_missing,
         validation_ratio=args.validation_ratio,
+        seed="openspliceai-imgt-v1",
     )
-    report.update(
-        {
-            "supplement_train_records": len(train_records),
-            "supplement_validation_records": len(validation_records),
-            "test_policy": "NCBI test data copied unchanged; no IMGT examples added",
-        }
-    )
-    write_audit_report(args.output_dir / "ncbi_imgt_splice_audit.json", report)
 
-    print("[4/5] Merging IMGT supplement into train/validation datafiles...")
-    for split, records in (
-        ("train", train_records),
-        ("validation", validation_records),
+    report = {
+        "policy": {
+            "priority": "NCBI baseline -> missing NCBI immune sites -> missing IMGT sites",
+            "test_set": "原始 NCBI test 原样复制，未加入 NCBI/IMGT 免疫补充记录",
+            "imgt_functional_only": not args.include_nonfunctional,
+        },
+        "parameters": {
+            "training_context_radius": args.training_context_radius,
+            "match_radius": args.match_radius,
+            "imgt_identity_threshold": args.identity_threshold,
+            "validation_ratio": args.validation_ratio,
+        },
+        "baseline_positive_site_count": len(baseline_sites),
+        "ncbi_immune_site_count": len(ncbi_sites),
+        "ncbi_already_in_baseline": len(ncbi_sites) - len(ncbi_missing),
+        "supplemented_from_ncbi": len(ncbi_missing),
+        "ncbi_supplement_train": len(ncbi_train),
+        "ncbi_supplement_validation": len(ncbi_validation),
+        "ncbi_sites": coverage_to_report(ncbi_coverage),
+        "imgt": imgt_report,
+        "imgt_supplement_train_records": len(imgt_train),
+        "imgt_supplement_validation_records": len(imgt_validation),
+    }
+    write_audit_report(
+        args.output_dir / "ncbi_imgt_splice_audit.json",
+        report,
+    )
+
+    print("[6/7] 合并 NCBI 与 IMGT 补充记录到 train / validation……")
+    for split, base, ncbi_split, imgt_split in (
+        ("train", base_train, ncbi_train, imgt_train),
+        (
+            "validation",
+            base_validation,
+            ncbi_validation,
+            imgt_validation,
+        ),
     ):
-        base = read_datafile_h5(args.base_data_dir / f"datafile_{split}.h5")
-        supplement = imgt_records_to_data(records)
+        ncbi_data = splice_sites_to_data(ncbi_split)
+        imgt_data = imgt_records_to_data(imgt_split)
+        immune_supplement = combine_data(ncbi_data, imgt_data)
+
+        write_datafile_h5(
+            args.output_dir / f"ncbi_supplement_{split}.h5",
+            ncbi_data,
+        )
         write_datafile_h5(
             args.output_dir / f"imgt_supplement_{split}.h5",
-            supplement,
+            imgt_data,
+        )
+        write_datafile_h5(
+            args.output_dir / f"immune_supplement_{split}.h5",
+            immune_supplement,
         )
         write_datafile_h5(
             args.output_dir / f"datafile_{split}.h5",
-            merge_data(base, supplement),
+            merge_data(base, immune_supplement),
         )
 
     shutil.copy2(
@@ -147,7 +230,7 @@ def main() -> int:
     )
 
     if not args.skip_dataset:
-        print("[5/5] Rebuilding dataset_train/validation/test.h5...")
+        print("[7/7] 重新生成 dataset_train/validation/test.h5……")
         from openspliceai.create_data import create_dataset
 
         dataset_args = SimpleNamespace(
@@ -157,11 +240,14 @@ def main() -> int:
         )
         create_dataset.create_dataset(dataset_args)
     else:
-        print("[5/5] Dataset rebuilding skipped by request.")
+        print("[7/7] 已按参数跳过 dataset_*.h5 生成。")
 
-    print(f"Audit report: {args.output_dir / 'ncbi_imgt_splice_audit.json'}")
-    print(f"IMGT missing sites added: {report['supplemented_from_imgt']}")
-    print("NCBI test set was not changed.")
+    print()
+    print("完成。")
+    print(f"审计报告：{args.output_dir / 'ncbi_imgt_splice_audit.json'}")
+    print(f"NCBI 免疫位点补充数：{len(ncbi_missing)}")
+    print(f"IMGT 位点补充数：{imgt_report['supplemented_from_imgt']}")
+    print("测试集保持原始 NCBI 基线不变。")
     return 0
 
 
