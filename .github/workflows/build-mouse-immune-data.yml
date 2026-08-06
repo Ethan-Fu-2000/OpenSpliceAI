@@ -1,4 +1,4 @@
-name: Build mouse NCBI and IMGT data release
+name: Build mouse NCBI GENCODE and IMGT data release
 
 on:
   push:
@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: mouse-immune-data-release-${{ github.ref }}
+  group: mouse-strict-data-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -45,7 +45,7 @@ jobs:
           sudo install /tmp/datasets /usr/local/bin/datasets
           datasets version
 
-      - name: Download current NCBI and IMGT data
+      - name: Download NCBI GRCm39 GENCODE M39 Basic and IMGT
         id: download
         shell: bash
         run: |
@@ -64,9 +64,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # Keep the extracted NCBI files, but remove the original package ZIP
-          # because it duplicates most of the release payload.
           find data/mouse_immune/ncbi -maxdepth 1 -type f -name "*.zip" -delete
 
           mkdir -p release
@@ -78,29 +75,29 @@ jobs:
 
           manifest = json.loads(Path("release/manifest.json").read_text())
           ncbi = manifest["ncbi"]
+          gencode = manifest["gencode"]
           imgt = manifest["imgt"]
           lines = [
-              "# Mouse immune reference data",
+              "# 小鼠严格剪接训练参考数据",
               "",
-              "This release was generated automatically from public upstream sources.",
+              "本 Release 由 GitHub Actions 从官方来源自动生成。",
               "",
-              f"- NCBI assembly: `{ncbi['assembly_accession']}`",
+              f"- NCBI assembly: `{ncbi['assembly_accession']}` / `{ncbi['assembly_name']}`",
               f"- NCBI Datasets CLI: `{ncbi['datasets_cli_version']}`",
+              f"- GENCODE: `{gencode['release']}` / `{gencode['assembly']}`",
+              f"- GENCODE annotation: `{gencode['annotation_set']}`",
               f"- IMGT/GENE-DB release: `{imgt['gene_db_release']}`",
               f"- IMGT/LIGM-DB release: `{imgt['ligm_db_release']}`",
               f"- Downloaded at: `{manifest['downloaded_at_utc']}`",
               "",
-              "The archive contains the NCBI GRCm39 genome FASTA, GFF3, GBFF and",
-              "sequence report together with the IMGT files used by the OpenSpliceAI",
-              "immune splice supplementation pipeline.",
+              "数据政策：只使用 GRCm39；不做 liftOver；GENCODE 仅使用 M39 Basic。",
               "",
-              "Sources:",
-              "",
+              "来源：",
               "- NCBI Datasets: https://www.ncbi.nlm.nih.gov/datasets/",
+              "- GENCODE Mouse: https://www.gencodegenes.org/mouse/",
               "- IMGT: https://www.imgt.org/",
               "",
-              "Verify `PARTS_SHA256SUMS`, concatenate the numbered parts, verify",
-              "`ARCHIVE_SHA256SUM`, and extract with `tar --zstd -xf`.",
+              "下载全部分卷后先校验 PARTS_SHA256SUMS，再合并并校验 ARCHIVE_SHA256SUM。",
               "",
           ]
           Path("release/DATA_PROVENANCE.md").write_text("\n".join(lines))
@@ -125,14 +122,15 @@ jobs:
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
 
           cat > release/RELEASE_NOTES.md <<EOF
-          Automated mouse immune-reference data package.
+          Automated strict mouse splice-reference data package.
 
+          Sources: NCBI GRCm39 + GENCODE M39 Basic + IMGT.
           Assembly: ${{ steps.download.outputs.assembly }}
           Source commit: ${GITHUB_SHA}
 
-          Download all numbered archive parts plus the checksum files.
-          The repository helper scripts/download_mouse_immune_release.sh
-          downloads, verifies, joins and extracts them.
+          Download all numbered archive parts plus checksum files.
+          Use scripts/download_mouse_immune_release.sh to download, verify,
+          join and extract the package.
           EOF
 
           ls -lh release
@@ -151,5 +149,5 @@ jobs:
             release/DATA_PROVENANCE.md \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
-            --title "Mouse NCBI + IMGT data ${{ steps.package.outputs.tag }}" \
+            --title "Mouse NCBI + GENCODE M39 Basic + IMGT data ${{ steps.package.outputs.tag }}" \
             --notes-file release/RELEASE_NOTES.md
