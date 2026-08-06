@@ -1,0 +1,155 @@
+name: Build mouse NCBI and IMGT data release
+
+on:
+  push:
+    branches:
+      - feat/imgt-splice-annotations
+    paths:
+      - ".github/workflows/build-mouse-immune-data.yml"
+      - "scripts/download_mouse_immune_training_data.py"
+      - "scripts/download_mouse_immune_release.sh"
+  workflow_dispatch:
+    inputs:
+      assembly:
+        description: NCBI GRCm39 assembly accession
+        required: true
+        default: GCF_000001635.27
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mouse-immune-data-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v6
+
+      - name: Install NCBI Datasets CLI and zstd
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes zstd
+          curl --fail --location --retry 5 \
+            --output /tmp/datasets \
+            "https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/v2/linux-amd64/datasets"
+          chmod +x /tmp/datasets
+          sudo install /tmp/datasets /usr/local/bin/datasets
+          datasets version
+
+      - name: Download current NCBI and IMGT data
+        id: download
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSEMBLY="${{ github.event.inputs.assembly }}"
+          if [[ -z "${ASSEMBLY}" ]]; then
+            ASSEMBLY="GCF_000001635.27"
+          fi
+          echo "assembly=${ASSEMBLY}" >> "${GITHUB_OUTPUT}"
+          python3 scripts/download_mouse_immune_training_data.py \
+            --assembly "${ASSEMBLY}" \
+            --output-dir data/mouse_immune
+
+      - name: Package and split release assets
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Keep the extracted NCBI files, but remove the original package ZIP
+          # because it duplicates most of the release payload.
+          find data/mouse_immune/ncbi -maxdepth 1 -type f -name "*.zip" -delete
+
+          mkdir -p release
+          cp data/mouse_immune/manifest.json release/manifest.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path("release/manifest.json").read_text())
+          ncbi = manifest["ncbi"]
+          imgt = manifest["imgt"]
+          lines = [
+              "# Mouse immune reference data",
+              "",
+              "This release was generated automatically from public upstream sources.",
+              "",
+              f"- NCBI assembly: `{ncbi['assembly_accession']}`",
+              f"- NCBI Datasets CLI: `{ncbi['datasets_cli_version']}`",
+              f"- IMGT/GENE-DB release: `{imgt['gene_db_release']}`",
+              f"- IMGT/LIGM-DB release: `{imgt['ligm_db_release']}`",
+              f"- Downloaded at: `{manifest['downloaded_at_utc']}`",
+              "",
+              "The archive contains the NCBI GRCm39 genome FASTA, GFF3, GBFF and",
+              "sequence report together with the IMGT files used by the OpenSpliceAI",
+              "immune splice supplementation pipeline.",
+              "",
+              "Sources:",
+              "",
+              "- NCBI Datasets: https://www.ncbi.nlm.nih.gov/datasets/",
+              "- IMGT: https://www.imgt.org/",
+              "",
+              "Verify `PARTS_SHA256SUMS`, concatenate the numbered parts, verify",
+              "`ARCHIVE_SHA256SUM`, and extract with `tar --zstd -xf`.",
+              "",
+          ]
+          Path("release/DATA_PROVENANCE.md").write_text("\n".join(lines))
+          PY
+
+          tar --use-compress-program="zstd -T0 -3" \
+            -cf release/mouse-immune-data.tar.zst \
+            -C data mouse_immune
+
+          (
+            cd release
+            sha256sum mouse-immune-data.tar.zst > ARCHIVE_SHA256SUM
+            split -b 1900M -d -a 3 \
+              --additional-suffix=.part \
+              mouse-immune-data.tar.zst \
+              mouse-immune-data.tar.zst.
+            sha256sum mouse-immune-data.tar.zst.*.part > PARTS_SHA256SUMS
+            rm mouse-immune-data.tar.zst
+          )
+
+          TAG="mouse-immune-data-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+          cat > release/RELEASE_NOTES.md <<EOF
+          Automated mouse immune-reference data package.
+
+          Assembly: ${{ steps.download.outputs.assembly }}
+          Source commit: ${GITHUB_SHA}
+
+          Download all numbered archive parts plus the checksum files.
+          The repository helper scripts/download_mouse_immune_release.sh
+          downloads, verifies, joins and extracts them.
+          EOF
+
+          ls -lh release
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.package.outputs.tag }}" \
+            release/mouse-immune-data.tar.zst.*.part \
+            release/PARTS_SHA256SUMS \
+            release/ARCHIVE_SHA256SUM \
+            release/manifest.json \
+            release/DATA_PROVENANCE.md \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "Mouse NCBI + IMGT data ${{ steps.package.outputs.tag }}" \
+            --notes-file release/RELEASE_NOTES.md
