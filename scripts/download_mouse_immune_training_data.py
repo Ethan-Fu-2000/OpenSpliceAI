@@ -18,6 +18,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -42,29 +43,76 @@ def sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def download_atomic(url: str, destination: Path, force: bool = False) -> None:
+def download_atomic(
+    url: str,
+    destination: Path,
+    force: bool = False,
+    attempts: int = 5,
+) -> None:
     if destination.exists() and not force:
         print(f"Using existing {destination}")
         return
+
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "OpenSpliceAI-mouse-immune-data/1.0"},
-    )
-    with tempfile.NamedTemporaryFile(
-        dir=destination.parent,
-        prefix=f".{destination.name}.",
-        delete=False,
-    ) as temporary:
-        temporary_path = Path(temporary.name)
-        try:
-            print(f"Downloading {url}")
-            with urllib.request.urlopen(request, timeout=300) as response:
-                shutil.copyfileobj(response, temporary)
-            os.replace(temporary_path, destination)
-        except Exception:
-            temporary_path.unlink(missing_ok=True)
-            raise
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "OpenSpliceAI-mouse-immune-data/1.0"},
+        )
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            try:
+                print(f"Downloading {url} (attempt {attempt}/{attempts})")
+                with urllib.request.urlopen(request, timeout=600) as response:
+                    shutil.copyfileobj(response, temporary)
+                os.replace(temporary_path, destination)
+                return
+            except Exception as error:
+                last_error = error
+                temporary_path.unlink(missing_ok=True)
+
+        if attempt < attempts:
+            delay = 10 * attempt
+            print(f"Download failed: {last_error}. Retrying in {delay} seconds.")
+            time.sleep(delay)
+
+    raise RuntimeError(f"Failed to download {url} after {attempts} attempts") from last_error
+
+
+def run_with_retries(
+    command: list[str],
+    *,
+    attempts: int = 5,
+    cleanup_path: Path | None = None,
+) -> None:
+    last_error: subprocess.CalledProcessError | None = None
+
+    for attempt in range(1, attempts + 1):
+        if cleanup_path is not None:
+            cleanup_path.unlink(missing_ok=True)
+
+        print(f"Running (attempt {attempt}/{attempts}): {' '.join(command)}")
+        result = subprocess.run(command, check=False)
+        if result.returncode == 0:
+            return
+
+        last_error = subprocess.CalledProcessError(result.returncode, command)
+        if attempt < attempts:
+            delay = 15 * attempt
+            print(
+                f"Command failed with exit code {result.returncode}. "
+                f"Retrying in {delay} seconds."
+            )
+            time.sleep(delay)
+
+    assert last_error is not None
+    raise last_error
 
 
 def run_ncbi_datasets(
@@ -78,16 +126,18 @@ def run_ncbi_datasets(
             "NCBI Datasets CLI was not found. Install it with: "
             "mamba install -c conda-forge ncbi-datasets-cli"
         )
+
     ncbi_dir = output_dir / "ncbi"
-    package_zip = ncbi_dir / f"{assembly}.zip"
+    package_zip = ncbi_dir / f"{assembly}.dehydrated.zip"
     extracted_dir = ncbi_dir / assembly
     ncbi_dir.mkdir(parents=True, exist_ok=True)
+
     if force:
         package_zip.unlink(missing_ok=True)
         if extracted_dir.exists():
             shutil.rmtree(extracted_dir)
 
-    if not package_zip.exists():
+    if not extracted_dir.exists():
         command = [
             datasets,
             "download",
@@ -96,17 +146,30 @@ def run_ncbi_datasets(
             assembly,
             "--include",
             "genome,gff3,gbff,seq-report",
+            "--dehydrated",
             "--filename",
             str(package_zip),
             "--no-progressbar",
         ]
-        print("Running:", " ".join(command))
-        subprocess.run(command, check=True)
+        run_with_retries(command, cleanup_path=package_zip)
 
-    if not extracted_dir.exists():
+        if not zipfile.is_zipfile(package_zip):
+            raise RuntimeError(f"NCBI dehydrated package is not a valid ZIP: {package_zip}")
+
         extracted_dir.mkdir(parents=True)
         with zipfile.ZipFile(package_zip) as archive:
             archive.extractall(extracted_dir)
+
+    rehydrate_command = [
+        datasets,
+        "rehydrate",
+        "--directory",
+        str(extracted_dir),
+        "--max-workers",
+        "4",
+        "--no-progressbar",
+    ]
+    run_with_retries(rehydrate_command)
 
     version = subprocess.run(
         [datasets, "version"],
@@ -169,11 +232,13 @@ def main() -> int:
     if data_report:
         files.append(data_report)
     files.extend(root / relative for relative in IMGT_FILES.values())
+
     manifest = {
         "downloaded_at_utc": datetime.now(timezone.utc).isoformat(),
         "ncbi": {
             "assembly_accession": args.assembly,
             "datasets_cli_version": datasets_version,
+            "download_mode": "dehydrated_then_rehydrated",
             "package_root": str(extracted.relative_to(root)),
             "genome_fasta": str(ncbi_fasta.relative_to(root)),
             "annotation_gff3": str(ncbi_gff.relative_to(root)),
