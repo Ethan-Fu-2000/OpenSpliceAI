@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Download, verify, join and extract the newest mouse immune data release.
+# 下载、校验、合并并解压最新的小鼠 NCBI+IMGT 数据 Release。
 
 set -euo pipefail
 
@@ -9,7 +9,7 @@ TAG="${2:-}"
 
 for command in gh sha256sum tar zstd; do
     if ! command -v "${command}" >/dev/null 2>&1; then
-        echo "Missing required command: ${command}" >&2
+        echo "缺少命令：${command}" >&2
         exit 1
     fi
 done
@@ -28,7 +28,7 @@ if [[ -z "${TAG}" ]]; then
 fi
 
 if [[ -z "${TAG}" || "${TAG}" == "null" ]]; then
-    echo "No mouse-immune-data release was found in ${REPOSITORY}." >&2
+    echo "在 ${REPOSITORY} 中未找到 mouse-immune-data Release。" >&2
     exit 1
 fi
 
@@ -36,7 +36,7 @@ mkdir -p "${DESTINATION}"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
-echo "Downloading release ${TAG} from ${REPOSITORY}"
+echo "从 ${REPOSITORY} 下载 ${TAG}"
 gh release download "${TAG}" \
     --repo "${REPOSITORY}" \
     --dir "${WORK_DIR}" \
@@ -53,9 +53,12 @@ gh release download "${TAG}" \
     sha256sum --check ARCHIVE_SHA256SUM
 )
 
+# 只有在完整分卷和总归档校验均通过后，才替换旧数据。
+# 这样会同时清除旧版遗留的 gencode/ 目录。
+rm -rf "${DESTINATION}/mouse_immune"
 tar --use-compress-program=zstd \
     -xf "${WORK_DIR}/mouse-immune-data.tar.zst" \
     -C "${DESTINATION}"
 
-echo "Extracted ${TAG} to ${DESTINATION}/mouse_immune"
-echo "Manifest: ${DESTINATION}/mouse_immune/manifest.json"
+echo "已解压 ${TAG} 到 ${DESTINATION}/mouse_immune"
+echo "清单：${DESTINATION}/mouse_immune/manifest.json"

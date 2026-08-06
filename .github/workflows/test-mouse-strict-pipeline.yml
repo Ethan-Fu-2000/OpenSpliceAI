@@ -1,4 +1,4 @@
-name: Test strict mouse NCBI GENCODE IMGT pipeline
+name: Test strict mouse NCBI and IMGT pipeline
 
 on:
   push:
@@ -6,13 +6,15 @@ on:
       - feat/imgt-splice-annotations
     paths:
       - ".github/workflows/test-mouse-strict-pipeline.yml"
-      - "openspliceai/create_data/gencode_splice.py"
       - "openspliceai/create_data/imgt_genome_match.py"
+      - "openspliceai/create_data/immune_splice.py"
+      - "openspliceai/create_data/immune_training.py"
       - "scripts/download_mouse_immune_training_data.py"
       - "scripts/prepare_mouse_strict_training.py"
       - "scripts/run_mouse_strict_retraining.py"
-      - "tests/unit/test_gencode_splice.py"
       - "tests/unit/test_imgt_genome_match.py"
+      - "tests/unit/test_immune_splice.py"
+      - "tests/unit/test_immune_training.py"
   workflow_dispatch:
 
 permissions:
@@ -41,7 +43,6 @@ jobs:
       - name: Compile strict pipeline files
         run: |
           python -m py_compile \
-            openspliceai/create_data/gencode_splice.py \
             openspliceai/create_data/imgt_genome_match.py \
             scripts/download_mouse_immune_training_data.py \
             scripts/prepare_mouse_strict_training.py \
@@ -50,7 +51,6 @@ jobs:
       - name: Run strict pipeline tests
         run: |
           python -m pytest -q \
-            tests/unit/test_gencode_splice.py \
             tests/unit/test_imgt_genome_match.py \
             tests/unit/test_immune_splice.py \
             tests/unit/test_immune_training.py

@@ -1,4 +1,4 @@
-name: Build mouse NCBI GENCODE and IMGT data release
+name: Build mouse NCBI and IMGT data release
 
 on:
   push:
@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: mouse-strict-data-release-${{ github.ref }}
+  group: mouse-ncbi-imgt-data-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -45,7 +45,7 @@ jobs:
           sudo install /tmp/datasets /usr/local/bin/datasets
           datasets version
 
-      - name: Download NCBI GRCm39 GENCODE M39 Basic and IMGT
+      - name: Download NCBI GRCm39 and IMGT
         id: download
         shell: bash
         run: |
@@ -75,26 +75,23 @@ jobs:
 
           manifest = json.loads(Path("release/manifest.json").read_text())
           ncbi = manifest["ncbi"]
-          gencode = manifest["gencode"]
           imgt = manifest["imgt"]
           lines = [
-              "# 小鼠严格剪接训练参考数据",
+              "# 小鼠 NCBI + IMGT 严格剪接训练参考数据",
               "",
               "本 Release 由 GitHub Actions 从官方来源自动生成。",
               "",
-              f"- NCBI assembly: `{ncbi['assembly_accession']}` / `{ncbi['assembly_name']}`",
-              f"- NCBI Datasets CLI: `{ncbi['datasets_cli_version']}`",
-              f"- GENCODE: `{gencode['release']}` / `{gencode['assembly']}`",
-              f"- GENCODE annotation: `{gencode['annotation_set']}`",
-              f"- IMGT/GENE-DB release: `{imgt['gene_db_release']}`",
-              f"- IMGT/LIGM-DB release: `{imgt['ligm_db_release']}`",
-              f"- Downloaded at: `{manifest['downloaded_at_utc']}`",
+              f"- 数据配置：`{manifest['policy']['profile']}`",
+              f"- NCBI assembly：`{ncbi['assembly_accession']}` / `{ncbi['assembly_name']}`",
+              f"- NCBI Datasets CLI：`{ncbi['datasets_cli_version']}`",
+              f"- IMGT/GENE-DB release：`{imgt['gene_db_release']}`",
+              f"- IMGT/LIGM-DB release：`{imgt['ligm_db_release']}`",
+              f"- 下载时间：`{manifest['downloaded_at_utc']}`",
               "",
-              "数据政策：只使用 GRCm39；不做 liftOver；GENCODE 仅使用 M39 Basic。",
+              "数据政策：只使用 GRCm39，不做 liftOver，不包含 GENCODE。",
               "",
               "来源：",
               "- NCBI Datasets: https://www.ncbi.nlm.nih.gov/datasets/",
-              "- GENCODE Mouse: https://www.gencodegenes.org/mouse/",
               "- IMGT: https://www.imgt.org/",
               "",
               "下载全部分卷后先校验 PARTS_SHA256SUMS，再合并并校验 ARCHIVE_SHA256SUM。",
@@ -124,7 +121,8 @@ jobs:
           cat > release/RELEASE_NOTES.md <<EOF
           Automated strict mouse splice-reference data package.
 
-          Sources: NCBI GRCm39 + GENCODE M39 Basic + IMGT.
+          Sources: NCBI GRCm39 + IMGT only.
+          GENCODE: not included.
           Assembly: ${{ steps.download.outputs.assembly }}
           Source commit: ${GITHUB_SHA}
 
@@ -149,5 +147,5 @@ jobs:
             release/DATA_PROVENANCE.md \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
-            --title "Mouse NCBI + GENCODE M39 Basic + IMGT data ${{ steps.package.outputs.tag }}" \
+            --title "Mouse NCBI + IMGT data ${{ steps.package.outputs.tag }}" \
             --notes-file release/RELEASE_NOTES.md
