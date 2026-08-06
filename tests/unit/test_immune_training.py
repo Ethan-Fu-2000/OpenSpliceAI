@@ -77,7 +77,8 @@ def test_splice_sites_to_data_places_label_at_center():
     data = splice_sites_to_data([_site()])
     assert len(data[0]) == 1
     assert data[5][0] == "AAAAGTAAAA"
-    assert data[6][0] == "000200000"
+    assert data[6][0] == "0002000000"
+    assert len(data[5][0]) == len(data[6][0])
     assert data[0][0].startswith("NCBI-IMMUNE:Ighj1:donor")
 
 
