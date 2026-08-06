@@ -180,10 +180,18 @@ def run_ncbi_datasets(
     return extracted_dir, version
 
 
-def locate_one(root: Path, name: str) -> Path:
-    matches = list(root.rglob(name))
+def locate_one(root: Path, suffix: str) -> Path:
+    matches = sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.name.endswith(suffix)
+    )
     if len(matches) != 1:
-        raise RuntimeError(f"Expected one {name} below {root}, found {len(matches)}")
+        names = ", ".join(str(path.relative_to(root)) for path in matches[:10])
+        raise RuntimeError(
+            f"Expected one file ending with {suffix} below {root}, "
+            f"found {len(matches)}: {names}"
+        )
     return matches[0]
 
 
